@@ -27,6 +27,8 @@ Evaluates creator beauty/cosmetics videos for brand safety, policy compliance, a
 | Medical / Cosmetic Claims | FDA FD&C §201, FTC 16 CFR 255 | BLOCK on fail, REVIEW on warn |
 | Campaign Relevance | — | BLOCK if off_brief, REVIEW if borderline |
 
+Full policy definitions and decision logic: [adsafe_decision_logic.pdf](https://github.com/lucyfang/twelvelabs-adsafe-demo/blob/main/adsafe_decision_logic.pdf)
+
 ## Verdict logic
 
 - **BLOCK** — any policy fails OR video is off-brief
