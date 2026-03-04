@@ -1,7 +1,7 @@
-# AdSafe — AI-Powered Ad Compliance Demo
+# BeautyComply — AI-Powered Ad Compliance Demo
 ### TwelveLabs Solutions Engineer Exercise
 
-**Live demo:** [twelvelabs-adsafe-demo.streamlit.app](https://twelvelabs-adsafe-demo.streamlit.app)
+**Live demo:** [twelvelabs-beautycomply-demo.streamlit.app](https://twelvelabs-beautycomply-demo.streamlit.app/)
 
 You'll need a [TwelveLabs API key](https://playground.twelvelabs.io/dashboard/api-keys) to run an analysis.
 
@@ -27,7 +27,7 @@ Evaluates creator beauty/cosmetics videos for brand safety, policy compliance, a
 | Medical / Cosmetic Claims | FDA FD&C §201, FTC 16 CFR 255 | BLOCK on fail, REVIEW on warn |
 | Campaign Relevance | — | BLOCK if off_brief, REVIEW if borderline |
 
-Full policy definitions and decision logic: [adsafe_decision_logic.pdf](https://github.com/lucyfang/twelvelabs-adsafe-demo/blob/main/adsafe_decision_logic.pdf)
+Full policy definitions and decision logic: [beautycomply_policy_framework.pdf](https://github.com/lucyfang/twelvelabs-adsafe-demo/blob/main/beautycomply_policy_framework.pdf)
 
 ## Verdict logic
 

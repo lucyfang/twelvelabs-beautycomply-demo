@@ -1,5 +1,5 @@
 """
-app.py — AdSafe: Ad Compliance & Brand Safety
+app.py — BeautyComply: Ad Compliance & Brand Safety
 TwelveLabs Solutions Engineer Demo · February 2026
 
 Run:
@@ -16,7 +16,7 @@ import streamlit as st
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="AdSafe — Compliance Review",
+    page_title="BeautyComply — Compliance Review",
     page_icon="🐎",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -791,7 +791,7 @@ def render_results(result: dict, clips: dict, video_url: str):
 
 def sidebar() -> dict:
     with st.sidebar:
-        st.markdown("# 🐎 AdSafe")
+        st.markdown("# 🐎 BeautyComply")
         st.caption("Ad Compliance & Brand Safety · Powered by TwelveLabs")
         st.divider()
 
