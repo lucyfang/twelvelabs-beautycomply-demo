@@ -3,13 +3,12 @@ app.py — AdSafe: Ad Compliance & Brand Safety
 TwelveLabs Solutions Engineer Demo · February 2026
 
 Run:
-    pip install streamlit requests pillow
+    pip install streamlit requests
     streamlit run app.py
 """
 
 import json
 import time
-from typing import Optional
 
 import requests
 import streamlit as st
@@ -103,15 +102,6 @@ POLICY_LABELS = {
     "drugs_illegal":           "Drugs / Illegal Behavior",
     "unsafe_product_usage":    "Unsafe / Misleading Product Usage",
     "medical_cosmetic_claims": "Medical or Cosmetic Claims",
-}
-
-# Semantic search queries per policy — used to fetch timestamped evidence clips
-POLICY_SEARCH_QUERIES = {
-    "hate_harassment":         "hate speech harassment discriminatory slur derogatory language mocking",
-    "profanity_explicit":      "profanity swearing explicit language cursing offensive words",
-    "drugs_illegal":           "drug use smoking vaping illegal activity substance paraphernalia",
-    "unsafe_product_usage":    "unsafe product application near eye unsanitary technique dangerous misuse",
-    "medical_cosmetic_claims": "clinically proven treats cures dermatologist approved heals skin condition",
 }
 
 STATUS_ICON = {"pass": "✅", "warn": "⚠️", "fail": "🚫"}
@@ -239,99 +229,6 @@ def poll_task(api_key: str, task_id: str, timeout: int = 360) -> str:
     raise TimeoutError("Video indexing timed out after 6 minutes.")
 
 
-def _pillarbox_png(data: bytes, w: int, h: int) -> bool:
-    """Sample PNG pixel columns to detect black bars on the sides."""
-    import zlib
-    color_type = data[25]
-    bit_depth  = data[24]
-    if color_type not in (2, 6) or bit_depth != 8:
-        return False
-    channels = 4 if color_type == 6 else 3
-    idat = b''
-    pos  = 8
-    while pos < len(data) - 12:
-        length     = int.from_bytes(data[pos:pos+4], 'big')
-        chunk_type = data[pos+4:pos+8]
-        if chunk_type == b'IDAT':
-            idat += data[pos+8:pos+8+length]
-        elif chunk_type == b'IEND':
-            break
-        pos += 12 + length
-    raw    = zlib.decompress(idat)
-    stride = 1 + w * channels
-    rows   = [int(h * f) for f in (0.25, 0.4, 0.5, 0.6, 0.75)]
-    bar_w  = max(1, int(w * 0.08))
-
-    def avg(row_idx, x0, n):
-        base = row_idx * stride + 1
-        return sum(
-            sum(raw[base + x*channels : base + x*channels + 3]) / 3
-            for x in range(x0, x0 + n)
-        ) / n
-
-    left_b   = sum(avg(r, 0, bar_w) for r in rows) / len(rows)
-    right_b  = sum(avg(r, w - bar_w, bar_w) for r in rows) / len(rows)
-    center_b = sum(avg(r, w//2 - bar_w//2, bar_w) for r in rows) / len(rows)
-    return left_b < 30 and right_b < 30 and center_b > 60
-
-
-def _detect_pillarbox(thumbnail_url: str, api_key: str = "") -> bool:
-    """
-    Download the video thumbnail and detect whether a horizontal-container
-    video actually contains vertical (9:16) content surrounded by black bars.
-
-    Uses Pillow (PIL) for reliable JPEG + PNG pixel sampling — Pillow is a
-    lightweight, widely-available package included in requirements.txt.
-    Falls back to the stdlib PNG-only path if Pillow is not installed.
-    Fails silently in all error cases — caller treats result as not pillarboxed.
-
-    Detection logic: sample left 8%, center, and right 8% column strips across
-    5 evenly-spaced rows. If both side strips average near-black (brightness <30)
-    while the center is significantly brighter (>60), content is pillarboxed.
-    """
-    try:
-        import urllib.request, io
-        headers = {"User-Agent": "Mozilla/5.0"}
-        if api_key:
-            headers["x-api-key"] = api_key
-        req = urllib.request.Request(thumbnail_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            img_bytes = resp.read()
-
-        try:
-            from PIL import Image
-            img  = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            w, h = img.size
-            bar_w   = max(1, int(w * 0.08))
-            rows    = [int(h * f) for f in (0.25, 0.4, 0.5, 0.6, 0.75)]
-            center_x = w // 2 - bar_w // 2
-
-            def strip_brightness(x0, y_list):
-                total = 0
-                for y in y_list:
-                    for x in range(x0, x0 + bar_w):
-                        r, g, b = img.getpixel((x, y))
-                        total += (r + g + b) / 3
-                return total / (bar_w * len(y_list))
-
-            left_b   = strip_brightness(0, rows)
-            right_b  = strip_brightness(w - bar_w, rows)
-            center_b = strip_brightness(center_x, rows)
-            return left_b < 30 and right_b < 30 and center_b > 60
-
-        except ImportError:
-            # Pillow not installed — fall back to PNG-only stdlib path
-            import struct
-            if img_bytes[:8] == b'\x89PNG\r\n\x1a\n':
-                pw = struct.unpack('>I', img_bytes[16:20])[0]
-                ph = struct.unpack('>I', img_bytes[20:24])[0]
-                return _pillarbox_png(img_bytes, pw, ph)
-            return False
-
-    except Exception:
-        return False
-
-
 def get_video_meta(api_key: str, index_id: str, video_id: str) -> dict:
     """
     Fetch video metadata from GET /indexes/{index_id}/videos/{video_id}.
@@ -340,11 +237,9 @@ def get_video_meta(api_key: str, index_id: str, video_id: str) -> dict:
       is_vertical   (bool)      — True if content is portrait orientation
       thumbnail_url (str|None)  — first thumbnail for preview
 
-    Vertical detection:
-      1. If container height > width → definitively vertical.
-      2. If container is 16:9 (horizontal) but aspect ratio is close to 16:9,
-         attempt pillarbox detection via thumbnail to catch vertical-in-horizontal.
-         Falls back to False if thumbnail unavailable.
+    Vertical detection: container height > width only.
+    Pillarbox detection was removed — it caused false positives that rendered
+    horizontal videos in portrait mode with black bars.
     """
     r = requests.get(
         f"{BASE_URL}/indexes/{index_id}/videos/{video_id}",
@@ -360,17 +255,8 @@ def get_video_meta(api_key: str, index_id: str, video_id: str) -> dict:
     meta      = data.get("system_metadata") or {}
     w, h      = meta.get("width", 1), meta.get("height", 1)
 
-    # Primary check: container is portrait
-    if h > w:
-        return {"url": url, "is_vertical": True, "thumbnail_url": thumb_url}
-
-    # Secondary check: 16:9 container — could be pillarboxed vertical content
-    aspect = w / h if h else 1
-    if 1.7 <= aspect <= 1.85 and thumb_url:
-        is_pillarboxed = _detect_pillarbox(thumb_url, api_key)
-        return {"url": url, "is_vertical": is_pillarboxed, "thumbnail_url": thumb_url}
-
-    return {"url": url, "is_vertical": False, "thumbnail_url": thumb_url}
+    is_vertical = h > w
+    return {"url": url, "is_vertical": is_vertical, "thumbnail_url": thumb_url}
 
 
 def analyze_video(api_key: str, video_id: str, prompt: str) -> str:
@@ -379,11 +265,11 @@ def analyze_video(api_key: str, video_id: str, prompt: str) -> str:
     Note: renamed from /generate to /analyze in API v1.3 (June 4, 2025).
     Response is always NDJSON streaming — use parse_stream(), never r.json().
     """
-    # TwelveLabs hard limit is 8,000 chars. Our base policy prompt is ~6,485 chars,
-    # leaving ~1,315 chars for brand + product + brief combined.
+    # TwelveLabs hard limit is 8,000 chars. Our base policy prompt is ~6,742 chars,
+    # leaving ~1,058 chars for brand + product + brief combined.
     # Guard fires 200 chars before the limit so the API never sees an oversized prompt.
-    MAX_PROMPT_CHARS = 7800
-    BASE_PROMPT_CHARS = 6485   # length of prompt with empty brand/product/brief
+    MAX_PROMPT_CHARS  = 7800
+    BASE_PROMPT_CHARS = 5568   # length of prompt with empty brand/product/brief
     CONTEXT_BUDGET    = MAX_PROMPT_CHARS - BASE_PROMPT_CHARS
     if len(prompt) > MAX_PROMPT_CHARS:
         context_used = len(prompt) - BASE_PROMPT_CHARS
@@ -415,7 +301,9 @@ def analyze_video(api_key: str, video_id: str, prompt: str) -> str:
 
 
 def search_clips(api_key: str, index_id: str, video_id: str,
-                 query: str, page_limit: int = 3) -> list[dict]:
+                 query: str, page_limit: int = 3,
+                 threshold: str = "medium",
+                 search_options: list[str] | None = None) -> list[dict]:
     """
     Semantic search for timestamped clips matching a query.
 
@@ -427,16 +315,21 @@ def search_clips(api_key: str, index_id: str, video_id: str,
       - "score" and "confidence" fields removed → use "rank" for ordering
       - Threshold "medium" enforces a genuine similarity floor (avoids returning
         irrelevant clips just because they're the closest available)
+
+    search_options defaults to ["visual", "transcription"]. Pass ["transcription"]
+    to search spoken words only (for audio policy evidence quotes).
     """
+    if search_options is None:
+        search_options = ["visual", "transcription"]
     multipart = [
-        ("index_id",       (None, index_id)),
-        ("query_text",     (None, query)),
-        ("search_options", (None, "visual")),
-        ("search_options", (None, "transcription")),
-        ("threshold",      (None, "medium")),
-        ("page_limit",     (None, str(page_limit))),
-        ("filter",         (None, json.dumps({"id": [video_id]}))),
+        ("index_id",   (None, index_id)),
+        ("query_text", (None, query)),
+        ("threshold",  (None, threshold)),
+        ("page_limit", (None, str(page_limit))),
+        ("filter",     (None, json.dumps({"id": [video_id]}))),
     ]
+    for opt in search_options:
+        multipart.append(("search_options", (None, opt)))
     r = requests.post(
         f"{BASE_URL}/search",
         headers={"x-api-key": api_key},
@@ -458,115 +351,73 @@ def build_compliance_prompt(brand: str, product: str, brief: str) -> str:
     High-severity threshold: any detectable infringement = minimum WARN.
     """
     return f"""
-You are a strict compliance reviewer for a social media ad platform evaluating
-creator beauty/cosmetics videos before paid promotion.
-
-REVIEWER MINDSET: Apply strict liability, not reasonable-viewer judgment. Default
-to FLAG not PASS. Do not use world knowledge to infer safety or acceptability —
-only evidence visible or audible in the video counts. "Everyone does it" is never
-a defence. A false positive costs one review; a false negative costs brand
-reputation and legal exposure.
+You are a strict ad compliance reviewer for a beauty/cosmetics creator platform.
+Apply strict liability — default to FLAG not PASS. Only what is visible or audible counts.
 
 CAMPAIGN CONTEXT
-Brand:   {brand}
-Product: {product}
-Brief:   {brief}
+Brand: {brand} | Product: {product}
+Brief: {brief}
 
 POLICIES
 
-P1 HATE/HARASSMENT (GARM Cat.6)
-FAIL: slurs or dehumanizing language targeting race, ethnicity, religion, gender,
-sexual orientation, disability, or nationality (spoken, on-screen, or in background);
-mocking/stereotyping a group; hate movement symbols; derogatory body commentary
-(fat-shaming, colorism, ageism); language framing lighter/brighter skin as the goal
-or improvement (colorism as product benefit).
-WARN: edgy humor interpretable as demeaning; comparative language implying one skin
-tone/type is superior; exclusionary framing; self-directed derogatory language about
-own appearance normalizing negative body image (e.g. "my skin is so disgusting").
-PASS: inclusive or neutral language; no demeaning content of any kind.
+P1 HATE/HARASSMENT
+FAIL: slurs or dehumanizing language (race, ethnicity, religion, gender, sexuality, disability); hate symbols; colorism framed as product benefit; fat-shaming, ageism.
+WARN: edgy humor interpretable as demeaning; self-directed body-negative language (e.g. "my skin is disgusting"); skin-tone superiority framing.
+PASS: inclusive or neutral language.
 
-P2 PROFANITY (GARM Cat.3)
-FAIL: strong profanity (f/s/c-word or equivalent in ANY language including
-code-switching); slurs as profanity; sexually explicit language; graphic violence.
-WARN: mild profanity ("damn","hell","ass","crap","bitch","bastard") even casually;
-bleeped/censored profanity (audible intent flagged); suggestive language.
-PASS: all language clean and appropriate for general audiences.
+P2 PROFANITY
+FAIL: strong profanity (f/s/c-word or equivalent, any language); slurs; explicit sexual language.
+WARN: mild profanity ("damn","hell","ass","crap","bitch"); bleeped/censored profanity; suggestive language.
+PASS: clean language throughout.
 
-P3 DRUGS/ILLEGAL (GARM Cat.4)
-FAIL: illegal drug use depicted, glorified, or referenced positively; drug
-paraphernalia visible; tobacco/cigarette smoking shown approvingly; vaping or
-e-cigarettes in any context; illegal activity depicted or normalized; creator
-visibly intoxicated during demo.
-WARN: alcohol prominently consumed on camera; prescription skincare (tretinoin,
-Accutane, antibiotics) mentioned alongside product in a way that frames product
-as part of a prescription regimen; casual references to past substance use.
-PASS: no substances, paraphernalia, or illegal activity visible or referenced.
+P3 DRUGS/ILLEGAL
+FAIL: illegal drug use depicted or glorified; paraphernalia visible; smoking/vaping shown; illegal activity normalized; creator visibly intoxicated.
+WARN: alcohol prominent on camera; prescription skincare framed as part of routine; casual past-use references.
+PASS: no substances or illegal activity.
 
-P4 UNSAFE PRODUCT USAGE (FDA cosmetic safety)
-CRITICAL — WATERLINE: Any product applied to waterline/inner eyelid is FAIL unless
-on-screen text explicitly states "ophthalmologist tested for waterline use". Do not
-infer safety from product category or common usage.
-FAIL: waterline/ocular application; product on broken skin; ingested/inhaled;
-dangerous combos (high-AHA + retinol; undiluted essential oils); double-dipping any
-tool after skin contact; visibly dirty tools; tester products on face; expired product.
-WARN: sloppy technique; tools appear unclean but double-dipping unconfirmed; adjacent
-to (not on) waterline; inadvisable combo without caveat.
-PASS: safe application per intended use; no eye-area contact; no unsanitary technique.
+P4 UNSAFE PRODUCT USAGE
+CRITICAL — WATERLINE: Applying any eye-area product (eyeliner, kajal, kohl, gel liner, eyeshadow, mascara) to the waterline/inner eyelid is FAIL unless on-screen text states "ophthalmologist tested for waterline use". This includes spoken recommendations to apply to the waterline even without on-screen demonstration. Non-eye products (foundation, concealer, blush, serum, moisturizer, primer) cannot physically reach the waterline — never flag these.
+FAIL: waterline application shown on screen OR spoken recommendation to apply to waterline; product on broken skin; ingested/inhaled; dangerous combos (high-AHA + retinol; undiluted essential oils); double-dipping; visibly dirty tools; tester on face.
+WARN: sloppy technique; tools appear unclean; eye-area product adjacent to (not on) waterline; inadvisable combo without caveat.
+PASS: safe application; no unsanitary technique.
 
-P5 MEDICAL/COSMETIC CLAIMS (FDA FD&C §201; FTC 16 CFR Part 255)
-CRITICAL — SILENT VISUAL CLAIMS: Before/after montage implying structural results
-is a drug claim even with no words spoken. Flag it.
-CRITICAL — THIRD-PARTY CLAIMS: "My dermatologist said X" is an unsubstantiated
-authority claim even when quoted. FTC rules apply regardless of attribution.
-FAIL: disease treatment claims (treats/cures/heals acne, eczema, rosacea, etc.);
-structural/physiological claims (regenerates cells, stimulates collagen, shrinks
-pores, removes wrinkles, eliminates cellulite); hedged superlatives ("might be the
-most hydrating" — hedging does not remove the superlative); unsubstantiated claims
-("clinically proven" without study, "dermatologist approved" without basis, "#1"
-without source); third-party authority claims; before/after visual drug claims;
-FTC disclosure missing or not at START of video (spoken or large on-screen text).
-WARN: borderline structure-function ("helps repair skin"); "clinically tested"
-without outcome; before/after without lighting disclaimer; disclosure present but
-after 30s or small text.
-PASS: appearance-only claims ("looks smoother", "feels hydrated", "reduces
-appearance of"); paid/gifted disclosed clearly at start; no structural claims.
+P5 MEDICAL/COSMETIC CLAIMS
+SILENT VISUAL CLAIM: Any split-screen, before/after, or side-by-side showing skin improvement is a structural drug claim — FAIL regardless of disclaimers or spoken words.
+FAIL: disease/treatment claims (treats/cures acne, eczema, rosacea); structural claims (regenerates cells, stimulates collagen, shrinks pores); hedged superlatives; "clinically proven/dermatologist approved/#1" without source; third-party authority claims; FTC disclosure missing or not at video start.
+WARN: "helps repair skin"; "clinically tested" without outcome; before/after without lighting disclaimer; disclosure after 30s or small text.
+PASS: appearance-only claims ("looks smoother", "feels hydrated"); FTC disclosure at start.
 
 CAMPAIGN RELEVANCE
-Evaluate strictly against Brand, Product, and Brief above.
-HARD RULE: If the video has nothing to do with beauty, cosmetics, or skincare at all
-(e.g. sports, gaming, entertainment, news, cooking, travel), score it 0 and mark
-off_brief immediately — do not attempt to find partial relevance.
-FAIL (off_brief): product/brand never mentioned or shown; primarily about a different
-product or a completely different category; <20% content features this product. Score 0–39.
-WARN (borderline): product mentioned but not the focus; 20–50% features this product.
-Score 40–64.
-PASS (on_brief): product is the clear subject of >50% of content; creator
-demonstrates or discusses it by name; tone matches brief. Score 65–100.
+HARD RULE: Video primarily featuring a different product = off_brief, score 0. No exceptions — no category overlap, no partial credit.
+HARD RULE: Non-beauty/cosmetics video = off_brief, score 0.
+off_brief: different product dominates or non-beauty. Score 0–39.
+borderline: correct product present but not focus. Score 40–64.
+on_brief: correct product clear subject >50%; creator names/demos it. Score 65–100.
 
-OUTPUT — return ONLY valid JSON, no markdown, no preamble:
+EVIDENCE RULE: verbatim only, and always clarify how the violation occurred:
+- Spoken: quote the exact words, prefixed with "Said:" e.g. Said: "I apply this to my waterline every day"
+- Visual: describe exactly what is seen e.g. "Applies eyeliner to inner eyelid"
+Never describe a spoken violation as if it were physically demonstrated, or vice versa.
+TIMESTAMP RULE: timestamp_sec = exact second violation occurs or is spoken. Not nearby. before/after at 0:31 → 31. "disgusting" spoken at 0:06 → 6.
+
+OUTPUT — valid JSON only, no markdown:
 {{
-  "description": "<2-4 sentences describing ONLY what you directly observe and hear in the video — do NOT reference the campaign brief, brand name, or product name unless the creator actually says/shows them. Describe the actual scene: setting, what the creator does, what they apply, what they say verbatim>",
+  "description": "<2-4 sentences: observable setting, actions, verbatim quotes — do not infer from brief>",
   "verdict": "<APPROVE|REVIEW|BLOCK>",
   "verdict_reasoning": "<1-2 sentences>",
-  "campaign_relevance": {{
-    "status": "<on_brief|borderline|off_brief>",
-    "score": <0-100>,
-    "reasoning": "<one sentence>"
-  }},
+  "campaign_relevance": {{"status":"<on_brief|borderline|off_brief>","score":<0-100>,"reasoning":"<one sentence>"}},
   "policies": {{
-    "hate_harassment":         {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","timestamp_sec":<int|null>,"evidence":"<quote or none detected>","reasoning":"<one sentence>"}},
-    "profanity_explicit":      {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","timestamp_sec":<int|null>,"evidence":"<quote or none detected>","reasoning":"<one sentence>"}},
-    "drugs_illegal":           {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","timestamp_sec":<int|null>,"evidence":"<quote or none detected>","reasoning":"<one sentence>"}},
-    "unsafe_product_usage":    {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","timestamp_sec":<int|null>,"evidence":"<quote or none detected>","reasoning":"<one sentence>"}},
-    "medical_cosmetic_claims": {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","timestamp_sec":<int|null>,"evidence":"<quote or none detected>","reasoning":"<one sentence>"}}
+    "hate_harassment":         {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","violations":[{{"timestamp_sec":<int|null>,"evidence":"<Said: verbatim OR visual description>"}}],"reasoning":"<one sentence>"}},
+    "profanity_explicit":      {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","violations":[{{"timestamp_sec":<int|null>,"evidence":"<Said: verbatim OR visual description>"}}],"reasoning":"<one sentence>"}},
+    "drugs_illegal":           {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","violations":[{{"timestamp_sec":<int|null>,"evidence":"<Said: verbatim OR visual description>"}}],"reasoning":"<one sentence>"}},
+    "unsafe_product_usage":    {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","violations":[{{"timestamp_sec":<int|null>,"evidence":"<Said: verbatim OR visual description>"}}],"reasoning":"<one sentence>"}},
+    "medical_cosmetic_claims": {{"status":"<pass|warn|fail>","confidence":"<high|medium|low>","violations":[{{"timestamp_sec":<int|null>,"evidence":"<Said: verbatim OR visual description>"}}],"reasoning":"<one sentence>"}}
   }}
 }}
 
-VERDICT RULES (strict order):
-BLOCK   — ANY policy=fail OR campaign_relevance=off_brief
-REVIEW  — ANY policy=warn OR campaign_relevance=borderline OR ANY confidence=low
-APPROVE — ALL policies=pass AND on_brief AND all confidence>=medium
-
+List ALL distinct violations in the violations array — one entry per moment. If pass, use violations:[].
+CONFIDENCE: high=unambiguous; medium=some ambiguity; low=uncertain(triggers REVIEW).
+VERDICT: BLOCK=any fail or off_brief; REVIEW=any warn/borderline/low-confidence; APPROVE=all pass+on_brief+medium+.
 Return only valid JSON.
 """.strip()
 
@@ -586,7 +437,8 @@ def run_compliance_check(api_key: str, video_id: str,
 
     # First try: parse as-is
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        return enforce_campaign_relevance(parsed, product)
     except json.JSONDecodeError:
         pass
 
@@ -594,10 +446,6 @@ def run_compliance_check(api_key: str, video_id: str,
     # Count open vs closed braces and append the missing closers.
     try:
         fixed = cleaned
-        open_braces   = fixed.count("{") - fixed.count("}")
-        open_brackets = fixed.count("[") - fixed.count("]")
-        # Close any open string by checking if we're mid-value (odd number of unescaped quotes)
-        # Simple heuristic: if last non-whitespace char isn't a closer, trim to last complete value
         fixed = fixed.rstrip()
         # If it ends mid-string or mid-value, trim back to last clean delimiter
         while fixed and fixed[-1] not in ('}', ']', '"', '0123456789'):
@@ -608,7 +456,8 @@ def run_compliance_check(api_key: str, video_id: str,
         open_braces   = fixed.count("{") - fixed.count("}")
         open_brackets = fixed.count("[") - fixed.count("]")
         fixed += "]" * open_brackets + "}" * open_braces
-        return json.loads(fixed)
+        parsed = json.loads(fixed)
+        return enforce_campaign_relevance(parsed, product)
     except json.JSONDecodeError as e:
         return {"error": f"JSON parse failed: {e}", "raw": raw}
 
@@ -616,32 +465,193 @@ def run_compliance_check(api_key: str, video_id: str,
 def fetch_timestamped_evidence(api_key: str, index_id: str, video_id: str,
                                 result: dict) -> dict[str, list[dict]]:
     """
-    For each flagged policy (warn or fail), run a targeted semantic search
-    to retrieve timestamped clip evidence. Returns empty list per policy
-    if no clips meet the similarity threshold — this is expected and correct
-    behavior; the Analyze verdict is still authoritative.
+    Timestamp strategy: Marengo search primary for all policies, Pegasus fallback.
+
+    Pegasus timestamp_sec drifts consistently — it cites where it *started reasoning*
+    about a violation, not where it visually/audibly occurs. Marengo searching the
+    actual evidence text (visual + transcription) finds the real moment more reliably.
+
+    For each flagged policy:
+      1. Run Marengo search on the Pegasus evidence string (both visual + transcription).
+         This finds the frame/second where that content actually appears.
+      2. If evidence is empty or Marengo returns nothing, fall back to Pegasus timestamp_sec.
+
+    Returns clips_by_policy: {policy_key: [{"start": int, "end": int}]}
     """
     clips_by_policy = {}
-    policies = result.get("policies", {})
+    policies        = result.get("policies", {})
+    CLIP_WINDOW     = 10
+    SKIP_EVIDENCE   = {"none detected", "none", "n/a", ""}
+
+    def marengo_clip(query: str) -> list[dict]:
+        try:
+            hits = search_clips(
+                api_key, index_id, video_id, query,
+                page_limit=1, threshold="medium",
+                search_options=["visual", "transcription"],
+            )
+            return [
+                {
+                    "start": int(c.get("start_time", c.get("start", 0))),
+                    "end":   int(c.get("end_time",   c.get("end",   0))),
+                }
+                for c in hits
+                if c.get("start_time") is not None or c.get("start") is not None
+            ]
+        except Exception:
+            return []
+
 
     for key in POLICY_CATEGORIES:
         policy = policies.get(key, {})
-        if policy.get("status") in ("warn", "fail"):
-            # Prefer the specific evidence text Pegasus already identified — much more
-            # targeted than a generic keyword bag, gives Marengo a precise quote to locate.
-            # Fall back to the generic query only if evidence is empty or generic.
-            evidence = policy.get("evidence", "")
-            if evidence and evidence.lower() not in ("none detected", "none", "n/a", ""):
-                query = evidence[:300]   # Marengo 3.0 supports up to 500 tokens; 300 chars is safe
-            else:
-                query = POLICY_SEARCH_QUERIES.get(key, key.replace("_", " "))
-            try:
-                clips = search_clips(api_key, index_id, video_id, query)
-                clips_by_policy[key] = clips
-            except Exception:
-                clips_by_policy[key] = []   # don't let search failure break the verdict
+        if policy.get("status") not in ("warn", "fail"):
+            continue
+
+        violations = policy.get("violations") or []
+        # Fallback: support old single-evidence schema if violations is absent
+        if not violations:
+            ev = (policy.get("evidence") or "").strip()
+            ts = policy.get("timestamp_sec")
+            violations = [{"evidence": ev, "timestamp_sec": ts}]
+
+        all_clips = []
+        for v in violations:
+            evidence = (v.get("evidence") or "").strip()
+            clips = []
+            if evidence.lower() not in SKIP_EVIDENCE:
+                clips = marengo_clip(evidence)
+            if not clips:
+                ts = v.get("timestamp_sec")
+                if ts is not None:
+                    try:
+                        t = int(ts)
+                        clips = [{"start": t, "end": t + CLIP_WINDOW}]
+                    except (TypeError, ValueError):
+                        pass
+            all_clips.extend(clips)
+
+        clips_by_policy[key] = all_clips
 
     return clips_by_policy
+
+
+# ── Campaign relevance enforcement ───────────────────────────────────────────
+
+_CR_STOP_WORDS = {
+    "collection", "line", "series", "new", "the", "and", "by",
+    "for", "with", "ultra", "super", "pro", "plus", "edition",
+}
+
+# Mutually exclusive cosmetic product categories. If the brief specifies a product
+# in one group and the video description features a product in another, it's a mismatch.
+PRODUCT_TYPE_GROUPS = [
+    {"foundation", "concealer", "coverage", "base makeup"},
+    {"serum", "essence", "ampoule", "booster"},
+    {"moisturizer", "moisturiser", "cream", "lotion", "balm"},
+    {"lipstick", "lip gloss", "lip liner", "lip stain", "lip"},
+    {"mascara", "eyeliner", "eyeshadow", "eye shadow", "eyebrow"},
+    {"blush", "bronzer", "contour", "highlighter", "setting powder"},
+    {"cleanser", "toner", "exfoliant", "scrub", "face wash"},
+    {"sunscreen", "spf", "sunblock"},
+    {"primer", "setting spray", "fixer"},
+]
+
+
+def _extract_product_keywords(product: str) -> set[str]:
+    """Meaningful keywords from a product name — strips generic stop words.
+    "Radiance Serum Collection" → {"radiance", "serum"}
+    """
+    return {w for w in product.lower().split() if w not in _CR_STOP_WORDS and len(w) > 2}
+
+
+def _find_product_group(keywords: set[str]) -> int | None:
+    """Return PRODUCT_TYPE_GROUPS index matching keywords, or None."""
+    for i, group in enumerate(PRODUCT_TYPE_GROUPS):
+        if any(k in keywords or any(k in kw for kw in keywords) for k in group):
+            return i
+    return None
+
+
+def enforce_campaign_relevance(result: dict, product: str) -> dict:
+    """
+    Post-processing guard for the campaign relevance HARD RULE.
+
+    Pegasus repeatedly scores product-mismatched videos on_brief — sometimes
+    hedging ("despite wrong product") but often just confidently wrong with no
+    signal words at all. Pure reasoning-string matching is insufficient.
+
+    Three layers (applied in order):
+      Layer 1 — Reasoning signals: catches "despite the mismatch" style responses.
+      Layer 2 — Description cross-check: brief product type vs. what the video
+                description actually mentions. E.g. "Radiance Serum" brief +
+                "foundation bottle" in description → force off_brief.
+      Layer 3 — Score band ceilings: borderline ≤ 64, on_brief ≥ 65.
+    """
+    relevance = result.get("campaign_relevance", {})
+    if not relevance:
+        return result
+
+    status      = relevance.get("status", "")
+    score       = relevance.get("score", 0)
+    reasoning   = (relevance.get("reasoning", "") or "").lower()
+    description = (result.get("description", "") or "").lower()
+
+    # Already correctly flagged — nothing to do
+    if status == "off_brief":
+        return result
+
+    def _force_off_brief(reason: str):
+        result["campaign_relevance"]["status"]    = "off_brief"
+        result["campaign_relevance"]["score"]     = 0
+        result["campaign_relevance"]["reasoning"] = reason
+        if result.get("verdict") != "BLOCK":
+            result["verdict"] = "BLOCK"
+            result["verdict_reasoning"] = (
+                "Campaign relevance: off brief — " + reason.rstrip(".")
+                + ". " + (result.get("verdict_reasoning") or "")
+            ).strip()
+
+    # ── Layer 1: reasoning signal words ────────────────────────────────────────
+    RATIONALIZATION_SIGNALS = {
+        "despite", "although", "even though", "however", "nevertheless",
+        "notwithstanding", "regardless", "while it", "though it",
+    }
+    MISMATCH_SIGNALS = {
+        "mismatch", "different product", "wrong product", "not the product",
+        "does not feature", "doesn't feature", "not about", "primarily about",
+        "incorrect product", "unrelated product",
+    }
+    has_rationalization = any(s in reasoning for s in RATIONALIZATION_SIGNALS)
+    has_mismatch        = any(s in reasoning for s in MISMATCH_SIGNALS)
+
+    if has_mismatch and has_rationalization:
+        _force_off_brief("Mismatch + rationalization detected in model reasoning.")
+        return result
+
+    # ── Layer 2: description-based product type cross-check ────────────────────
+    brief_keywords   = _extract_product_keywords(product)
+    brief_group      = _find_product_group(brief_keywords)
+
+    if brief_group is not None:
+        for i, group in enumerate(PRODUCT_TYPE_GROUPS):
+            if i == brief_group:
+                continue
+            conflicting_terms = [term for term in group if term in description]
+            brief_terms_in_desc = [kw for kw in brief_keywords if kw in description]
+            if conflicting_terms and not brief_terms_in_desc:
+                _force_off_brief(
+                    f"The video features a {conflicting_terms[0]} product, "
+                    f"not the {product} specified in the brief."
+                )
+                return result
+
+    # ── Layer 3: score band ceilings ───────────────────────────────────────────
+    if status == "borderline" and score > 64:
+        result["campaign_relevance"]["score"] = 64
+    if status == "on_brief" and score < 65:
+        result["campaign_relevance"]["score"] = 65
+
+    return result
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -662,10 +672,20 @@ def render_policy_row(key: str, policy: dict, clips: list[dict]):
     label      = POLICY_LABELS.get(key, key)
     status     = policy.get("status", "pass")
     confidence = policy.get("confidence", "high")
-    evidence   = policy.get("evidence", "none detected")
-    reasoning  = policy.get("reasoning", "")
-    icon       = STATUS_ICON.get(status, "")
-    conf_icon  = CONF_ICON.get(confidence, "")
+    reasoning  = (policy.get("reasoning", "") or "")
+    for marker in ("Original reasoning:", "Original score:"):
+        idx = reasoning.find(marker)
+        if idx != -1:
+            reasoning = reasoning[:idx].rstrip(". ")
+    icon      = STATUS_ICON.get(status, "")
+    conf_icon = CONF_ICON.get(confidence, "")
+
+    # Normalise: new schema uses violations[], old schema uses evidence + timestamp_sec
+    violations = policy.get("violations") or []
+    if not violations:
+        ev = (policy.get("evidence", "") or "").replace("[AUTO] ", "")
+        if ev and ev.lower() != "none detected":
+            violations = [{"evidence": ev, "timestamp_sec": policy.get("timestamp_sec")}]
 
     with st.expander(f"{icon} **{label}** — `{status.upper()}`  {conf_icon} confidence: `{confidence}`"):
         col_left, col_right = st.columns([1, 2])
@@ -676,11 +696,15 @@ def render_policy_row(key: str, policy: dict, clips: list[dict]):
             st.markdown(f"**Confidence:** <span class='conf-{confidence}'>{confidence}</span>", unsafe_allow_html=True)
 
         with col_right:
-            if evidence and evidence != "none detected":
-                ts = policy.get("timestamp_sec")
-                ts_badge = f' <span class="timestamp-chip">⏱ {fmt_time(ts)}</span>' if ts is not None else ""
+            for i, v in enumerate(violations):
+                ev_text = (v.get("evidence") or "").replace("[AUTO] ", "")
+                if not ev_text or ev_text.lower() == "none detected":
+                    continue
+                # Timestamp: use corresponding clip if available, else violation's own timestamp_sec
+                clip_ts = clips[i]["start"] if i < len(clips) and clips[i].get("start") is not None else v.get("timestamp_sec")
+                ts_badge = f' <span class="timestamp-chip">⏱ {fmt_time(clip_ts)}</span>' if clip_ts is not None else ""
                 st.markdown(
-                    f'<div class="evidence-block">📌 <strong>Evidence:</strong>{ts_badge} {evidence}</div>',
+                    f'<div class="evidence-block">📌 <strong>Evidence:</strong>{ts_badge} {ev_text}</div>',
                     unsafe_allow_html=True,
                 )
             if reasoning:
@@ -692,9 +716,7 @@ def render_policy_row(key: str, policy: dict, clips: list[dict]):
         if clips:
             starts = [fmt_time(int(c["start"])) + "–" + fmt_time(int(c.get("end", c["start"])))
                       for c in clips if c.get("start") is not None]
-            chips  = "  ".join(
-                f'<span class="timestamp-chip">⏱ {s}</span>' for s in starts
-            )
+            chips = "  ".join(f'<span class="timestamp-chip">⏱ {s}</span>' for s in starts)
             st.markdown(chips, unsafe_allow_html=True)
             st.caption("↑ click Jump buttons next to the player to seek")
         elif status in ("warn", "fail"):
@@ -712,19 +734,31 @@ def render_results(result: dict, clips: dict, video_url: str):
     reasoning = result.get("verdict_reasoning", "")
     relevance = result.get("campaign_relevance", {})
 
+    def _clean_reasoning(text: str) -> str:
+        """Strip [AUTO-OVERRIDE] prefix and 'Original ...' trailer from displayed text."""
+        if not text:
+            return text
+        text = text.replace("[AUTO-OVERRIDE] ", "").replace("[AUTO] ", "")
+        # Trim anything from "Original score:" or "Original reasoning:" onward
+        for marker in ("Original score:", "Original reasoning:"):
+            idx = text.find(marker)
+            if idx != -1:
+                text = text[:idx].rstrip(". ")
+        return text.strip()
+
     # ── Verdict + Campaign Relevance
     col_v, col_r = st.columns([1, 2])
     with col_v:
         st.markdown("### Verdict")
         render_verdict_badge(verdict)
         if reasoning:
-            st.caption(reasoning)
+            st.caption(_clean_reasoning(reasoning))
 
     with col_r:
         st.markdown("### Campaign Relevance")
         rel_status = relevance.get("status", "unknown")
         rel_score  = relevance.get("score", 0)
-        rel_reason = relevance.get("reasoning", "")
+        rel_reason = _clean_reasoning(relevance.get("reasoning", ""))
         color = {"on_brief": "#C8FF00", "off_brief": "#FF4444", "borderline": "#FFB800"}.get(rel_status, "#888880")
         st.markdown(
             f"<span style='color:{color};font-size:1.1rem;font-weight:600'>"
@@ -745,81 +779,67 @@ def render_results(result: dict, clips: dict, video_url: str):
     # ── Video player with timestamp jump
     st.markdown("### Video")
 
-    # Collect timestamps from two sources:
-    # 1. Marengo search clips (precise, from semantic search)
-    # 2. Pegasus timestamp_sec fields (direct from analysis — may be coarser but always present)
+    # Collect all flagged timestamps — from Marengo clips (visual policies)
+    # and Pegasus timestamp_sec (audio policies) — for the jump panel and seek buttons.
     ts_set = set()
-    all_clips_flat = []   # (policy_label, start, end) for side panel
+    all_clips_flat = []   # (policy_label, start, end, evidence) for side panel
     for pol_key, clip_list in clips.items():
-        for c in clip_list:
+        pol_data   = result.get("policies", {}).get(pol_key, {})
+        violations = pol_data.get("violations") or []
+        # Build a flat list of evidence strings aligned with clip_list order
+        ev_strings = [v.get("evidence", "") for v in violations] if violations else [pol_data.get("evidence", "")]
+        for i, c in enumerate(clip_list):
             if c.get("start") is not None:
+                ev = ev_strings[i] if i < len(ev_strings) else (ev_strings[0] if ev_strings else "")
                 ts_set.add(int(c["start"]))
-                all_clips_flat.append((POLICY_LABELS.get(pol_key, pol_key), int(c["start"]), int(c.get("end", c["start"]))))
-    policies_data = result.get("policies", {})
-    for pol_key, policy in policies_data.items():
-        if policy.get("status") in ("warn", "fail"):
-            ts = policy.get("timestamp_sec")
-            if ts is not None:
-                try:
-                    ts_set.add(int(ts))
-                except (TypeError, ValueError):
-                    pass
+                all_clips_flat.append((POLICY_LABELS.get(pol_key, pol_key), int(c["start"]), int(c.get("end", c["start"])), ev))
     all_timestamps = sorted(ts_set)
 
-    # video_url is None for local file uploads — fall back to stored bytes
-    video_source = video_url or st.session_state.get("video_bytes")
+    video_source  = video_url or st.session_state.get("video_bytes")
+    is_hls        = isinstance(video_url, str) and video_url.endswith(".m3u8")
     supports_seek = video_url is not None
 
-    is_vertical = st.session_state.get("video_is_vertical", False)
-
-    # Layout: player column + clip panel column
-    # Vertical: narrow player [1], clips [2]  Horizontal: player [3], clips [2]
-    player_ratio = [1, 2] if is_vertical else [3, 2]
-    vid_col, clips_col = st.columns(player_ratio)
+    vid_col, clips_col = st.columns([3, 2])
 
     with vid_col:
         if video_source is None:
             st.warning("No video source available for playback.")
         else:
             seek_to = st.session_state.get("seek_to", 0)
-            if supports_seek and isinstance(video_source, str) and video_source.endswith(".m3u8"):
-                # HLS stream — st.video can't seek HLS; use HLS.js in an iframe
-                height = 340 if is_vertical else 310
-                hls_html = f"""
-<!DOCTYPE html><html><body style="margin:0;background:#000">
+            if is_hls:
+                is_vertical = st.session_state.get("video_is_vertical", False)
+                height = 560 if is_vertical else 360
+                hls_html = f"""<!DOCTYPE html><html><body style="margin:0">
 <video id="v" controls style="width:100%;height:{height}px;display:block" playsinline></video>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.4.12/dist/hls.min.js"></script>
 <script>
   var src="{video_source}", t={seek_to};
   var v=document.getElementById("v");
+  function nativeLoad(){{v.src=src;v.addEventListener("loadedmetadata",function(){{v.currentTime=t;v.play();}});}}
   if(Hls.isSupported()){{
-    var hls=new Hls();
-    hls.loadSource(src);
-    hls.attachMedia(v);
-    hls.on(Hls.Events.MANIFEST_PARSED,function(){{v.currentTime=t;v.play();}});
-  }}else if(v.canPlayType("application/vnd.apple.mpegurl")){{
-    v.src=src; v.addEventListener("loadedmetadata",function(){{v.currentTime=t;v.play();}});
-  }}
+    var h=new Hls();
+    h.loadSource(src);
+    h.attachMedia(v);
+    h.on(Hls.Events.MANIFEST_PARSED,function(){{v.currentTime=t;v.play();}});
+    h.on(Hls.Events.ERROR,function(e,d){{if(d.fatal){{h.destroy();nativeLoad();}}}});
+    setTimeout(function(){{if(v.readyState===0){{h.destroy();nativeLoad();}}}},5000);
+  }}else{{nativeLoad();}}
 </script></body></html>"""
-                st.components.v1.html(hls_html, height=height + 10)
-            elif supports_seek:
+                st.components.v1.html(hls_html, height=height + 4, scrolling=False)
+            elif supports_seek and seek_to:
                 st.video(video_source, start_time=seek_to)
             else:
-                if all_timestamps:
-                    ts_str = "  ".join(fmt_time(t) for t in all_timestamps)
-                    st.caption(f"⏱ Flagged moments: {ts_str} — seek manually")
                 st.video(video_source)
 
     with clips_col:
-        if all_clips_flat and supports_seek:
+        if all_clips_flat:
             st.markdown("**Jump to flagged clip:**")
-            # Deduplicate by start time, preserve labels
             seen = {}
-            for label, start, end in all_clips_flat:
+            for label, start, end, evidence in all_clips_flat:
                 if start not in seen:
-                    seen[start] = (label, end)
+                    seen[start] = (label, end, evidence)
             for start in sorted(seen):
-                label, end = seen[start]
+                label, end, evidence = seen[start]
                 short_label = label.split(" / ")[0]
                 st.markdown('<div class="clip-btn">', unsafe_allow_html=True)
                 if st.button(
@@ -829,9 +849,10 @@ def render_results(result: dict, clips: dict, video_url: str):
                 ):
                     st.session_state["seek_to"] = start
                     st.rerun()
+                if evidence and evidence.lower() not in ("none detected", "none", "n/a", ""):
+                    st.caption(evidence[:120] + ("…" if len(evidence) > 120 else ""))
                 st.markdown('</div>', unsafe_allow_html=True)
-        elif all_timestamps and supports_seek:
-            # Pegasus timestamps only — no Marengo clips; show as simple buttons
+        elif all_timestamps:
             st.markdown("**Jump to flagged moment:**")
             for ts in all_timestamps:
                 st.markdown('<div class="clip-btn">', unsafe_allow_html=True)
@@ -1053,8 +1074,8 @@ def main():
                     cfg["brand"], cfg["product"], cfg["brief"],
                 )
 
-                # Step 5 — Evidence (Marengo)
-                st.write("Fetching timestamped evidence via Marengo search…")
+                # Step 5 — Timestamps (hybrid: Marengo for visual policies, Pegasus for audio)
+                st.write("Extracting violation timestamps (Marengo visual search + Pegasus)…")
                 clips = fetch_timestamped_evidence(
                     cfg["api_key"], index_id, video_id, result
                 )
