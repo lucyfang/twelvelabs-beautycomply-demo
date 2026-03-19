@@ -1,7 +1,7 @@
 # BeautyComply — AI-Powered Ad Compliance Demo
 ### TwelveLabs Solutions Engineer Exercise
 
-**Presentation:** [https://beautycomply-aai6qmt.gamma.site/](https://beautycomply-aai6qmt.gamma.site/)
+**Presentation:** [https://beautycomply-aai6qmt.gamma.site](https://beautycomply-aai6qmt.gamma.site/)  
 **Live demo:** [twelvelabs-beautycomply-demo.streamlit.app](https://twelvelabs-beautycomply-demo.streamlit.app/)
 
 You'll need a [TwelveLabs API key](https://playground.twelvelabs.io/dashboard/api-keys) to run an analysis.
